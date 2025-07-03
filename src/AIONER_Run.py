@@ -21,7 +21,13 @@ import tensorflow as tf
 gpu = tf.config.list_physical_devices('GPU')
 print("Num GPUs Available: ", len(gpu))
 if len(gpu) > 0:
-    tf.config.experimental.set_memory_growth(gpu[0], True)
+    try:
+        # 统一设置所有GPU按需增长内存
+        for gpu in gpu:
+            tf.config.experimental.set_memory_growth(gpu, True)  # 全部启用或全部禁用
+    except RuntimeError as e:
+        print(e)  # 仅当GPU运行时已初始化会报错，可忽略
+    # tf.config.experimental.set_memory_growth(gpu[0], True)
 
 
 import stanza
