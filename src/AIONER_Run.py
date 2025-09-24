@@ -245,7 +245,7 @@ def NER_main_path(inpath, para_set, outpath, modelfile):
                 input_format=""
                 for line in fin:
                     pattern_bioc = re.compile('.*<collection>.*')
-                    pattern_pubtator = re.compile('^([^0-9A-Za-z]+)\|[^\|]+\|(.*)')
+                    pattern_pubtator = re.compile('^([^\|]+)\|[^\|]+\|(.*)')
                     if pattern_pubtator.search(line):
                         input_format="PubTator"
                         break
