@@ -5,18 +5,24 @@ Created on Sun Oct 16 20:02:20 2022
 @author: luol2
 """
 
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Feb 10 16:01:26 2021
 
+@author: luol2
+"""
 import argparse
 import os
 import time
 import re
 import io
 import bioc
+import stanza
 
 from model_ner import HUGFACE_NER
 from processing_data import ml_intext_fn,out_BIO_BERT_crf_fn,out_BIO_BERT_softmax_fn
 from restore_index import NN_restore_index_fn
-
+from postprocessing import postprocess_abbr,entity_consistency
 import tensorflow as tf
 gpu = tf.config.list_physical_devices('GPU')
 print("Num GPUs Available: ", len(gpu))
@@ -28,11 +34,6 @@ if len(gpu) > 0:
     except RuntimeError as e:
         print(e)  # 仅当GPU运行时已初始化会报错，可忽略
     # tf.config.experimental.set_memory_growth(gpu[0], True)
-
-
-import stanza
-nlp = stanza.Pipeline(lang='en', processors={'tokenize': 'spacy'},package='None') #package='craft'
-
 
 def pre_token(sentence):
     sentence=re.sub("([\=\/\(\)\<\>\+\-\_])"," \\1 ",sentence)
@@ -58,16 +59,16 @@ def ssplit_token(in_text,entity_type,max_len=400):
                 strlen=0
         fout.write('</'+entity_type+'>\tO\n')
         fout.write('\n')
-        strlen=0           
+        strlen=0
     return fout.getvalue()
 
 def ml_tagging(ml_input,nn_model,decoder_type='crf'):
 
-    
+
     test_list = ml_intext_fn(ml_input)
-    if decoder_type=='crf': 
+    if decoder_type=='crf':
         test_x,test_y, test_bert_text_label=nn_model.rep.load_data_hugface(test_list,word_max_len=nn_model.maxlen,label_type='crf')
-    elif decoder_type=='softmax': 
+    elif decoder_type=='softmax':
         test_x,test_y, test_bert_text_label=nn_model.rep.load_data_hugface(test_list,word_max_len=nn_model.maxlen,label_type='softmax')
 
     test_pre = nn_model.model.predict(test_x,batch_size=64)
@@ -82,17 +83,17 @@ def ml_tagging(ml_input,nn_model,decoder_type='crf'):
 def ML_Tag(text,ml_model,decoder_type='crf',entity_type='ALL'):
 
     conll_in=ssplit_token(text, entity_type, max_len=ml_model.maxlen)
-    #print(ssplit_token) 
+    #print(ssplit_token)
 #    print('ssplit token:',time.time()-startTime)
-    
+
 #    startTime=time.time()
     ml_tsv=ml_tagging(conll_in,ml_model,decoder_type=decoder_type)
     #print('ml_tsv:\n',ml_tsv)
 #    print('ml ner:',time.time()-startTime)
-   
+
     final_result= NN_restore_index_fn(text,ml_tsv)
     # print('final ner:',time.time()-startTime)
-    
+
     return final_result
 
 def NER_PubTator(infile,outfile,nn_model,para_set):
@@ -114,17 +115,33 @@ def NER_PubTator(infile,outfile,nn_model,para_set):
                 title=seg[1]
                 seg=lines[1].split('|a|')
                 abstract=seg[1]
-                
+
                 intext=title+' '+abstract
+                #Machine learning model predict
                 tag_result=ML_Tag(intext,nn_model,decoder_type=para_set['decoder_type'],entity_type=para_set['entity_type'])
-                fout.write(lines[0]+'\n'+lines[1]+'\n')
-                for ele in tag_result:
-                    ent_start = ele[0]
-                    ent_last = ele[1]
-                    ent_mention = intext[int(ele[0]):int(ele[1])]
-                    ent_type=ele[2]
-                    fout.write(pmid+"\t"+ent_start+"\t"+ent_last+"\t"+ent_mention+"\t"+ent_type+"\n")
-                fout.write('\n')
+
+                #post-processing
+                if len(tag_result)>0:
+                    ner_result={}
+                    for ele in tag_result:
+                        # ent_start = ele[0]
+                        # ent_last = ele[1]
+                        # ent_mention = intext[int(ele[0]):int(ele[1])]
+                        # ent_type=ele[2]
+                        ner_result[ele[0]+' '+ele[1]]=[ele[0],ele[1],intext[int(ele[0]):int(ele[1])],ele[2]]
+                    # abbr recognition
+                    final_ner=postprocess_abbr(ner_result,intext)
+                    #entity consistence
+                    final_ner=entity_consistency(final_ner,intext)
+                    # final_result=sorted(final_ner.items(), key=lambda kv:(kv[1]), reverse=False)
+                    fout.write(lines[0]+'\n'+lines[1]+'\n')
+
+                    for ele in final_ner:
+                        fout.write(pmid+'\t'+'\t'.join(ele)+'\n')
+                    fout.write('\n')
+                else:
+                    fout.write(lines[0]+'\n'+lines[1]+'\n\n')
+
                 title=''
                 abstract=''
 
@@ -133,7 +150,7 @@ def NER_BioC(infile,outfile,nn_model,para_set):
     with open(infile, 'r',encoding='utf-8') as fin:
         with open(outfile,'w', encoding='utf-8') as fout:
             collection = bioc.load(fin)
-            
+
             Total_n=len(collection.documents)
             print('Total number of sub-documents:', Total_n)
             doc_num=0
@@ -145,25 +162,47 @@ def NER_BioC(infile,outfile,nn_model,para_set):
                 for passage in document.passages:
                     if passage.text!='' and (not passage.text.isspace()) and passage.infons['type']!='ref': # have text and is not ref
                         passage_offset=passage.offset
+                        # machine learning predict
                         tag_result=ML_Tag(passage.text,nn_model,decoder_type=para_set['decoder_type'],entity_type=para_set['entity_type'])
-                        for ele in tag_result:
-                            bioc_note = bioc.BioCAnnotation()
-                            bioc_note.id = str(mention_num)
-                            mention_num+=1
-                            bioc_note.infons['type'] = ele[2]
-                            start = int(ele[0])
-                            last = int(ele[1])
-                            loc = bioc.BioCLocation(offset=str(passage_offset+start), length= str(last-start))
-                            bioc_note.locations.append(loc)
-                            bioc_note.text = passage.text[start:last]
-                            passage.annotations.append(bioc_note)
+
+                        #post-processing
+                        intext=passage.text
+                        if len(tag_result)>0:
+                            ner_result={}
+                            for ele in tag_result:
+                                # ent_start = ele[0]
+                                # ent_last = ele[1]
+                                # ent_mention = intext[int(ele[0]):int(ele[1])]
+                                # ent_type=ele[2]
+                                ner_result[ele[0]+' '+ele[1]]=[ele[0],ele[1],intext[int(ele[0]):int(ele[1])],ele[2]]
+                            # abbr recognition
+
+                            final_ner=postprocess_abbr(ner_result,intext)
+                            #entity consistence
+                            final_ner=entity_consistency(final_ner,intext)
+                            # final_result=sorted(final_ner.items(), key=lambda kv:(kv[1]), reverse=False)
+
+
+                            for ele in final_ner:
+                                bioc_note = bioc.BioCAnnotation()
+                                bioc_note.id = str(mention_num)
+                                mention_num+=1
+                                bioc_note.infons['type'] = ele[3]
+                                start = int(ele[0])
+                                last = int(ele[1])
+                                loc = bioc.BioCLocation(offset=str(passage_offset+start), length= str(last-start))
+                                bioc_note.locations.append(loc)
+                                bioc_note.text = passage.text[start:last]
+                                passage.annotations.append(bioc_note)
+
             bioc.dump(collection, fout, pretty_print=True)
-    
-   
+
+
 
 def NER_main_path(inpath, para_set, outpath, modelfile):
-    
+
     #check if file exsited
+
     files_exsited=0
     for infile in os.listdir(inpath):
         if os.path.isfile(outpath+infile):
@@ -175,44 +214,38 @@ def NER_main_path(inpath, para_set, outpath, modelfile):
     if files_exsited==0:
         print('All files have exsited.')
     else:
-    
-        print('loading models........')    
-        
-        
-        if para_set['encoder_type']=='pubmedbert':
-            vocabfiles={'labelfile':para_set['vocabfile'],
-                        'checkpoint_path':f"{para_set['models_base_dir']}/pretrained_models/BiomedNLP-PubMedBERT-base-uncased-abstract/",
-                        'lowercase':True,
-                        } 
-        elif para_set['encoder_type']=='bioformer':
-            vocabfiles={'labelfile':para_set['vocabfile'],
-                        'checkpoint_path':f"{para_set['model_base_dir']}/pretrained_models/bioformer-cased-v1.0/",
-                        'lowercase':False,
-                        }    
-        
+
+        print('loading models........')
+
+
+        vocabfiles={'labelfile':para_set['vocabfile'],
+                    'checkpoint_path':para_set['checkpoint'],
+                    'lowercase':False,
+                    }
+
         nn_model=HUGFACE_NER(vocabfiles)
         nn_model.build_encoder()
-        if para_set['decoder_type']=='crf': 
+        if para_set['decoder_type']=='crf':
             nn_model.build_crf_decoder()
         elif para_set['decoder_type']=='softmax':
             nn_model.build_softmax_decoder()
-            
+
         nn_model.load_model(modelfile)
-            
+
         #tagging text
         print("begin tagging........")
         start_time=time.time()
-        
+
         for infile in os.listdir(inpath):
             if os.path.isfile(outpath+infile):
                 print(infile+' has exsited.')
             else:
-                print('processing:',infile)             
+                print('processing:',infile)
                 fin = open(inpath+infile, 'r',encoding='utf-8')
                 input_format=""
                 for line in fin:
                     pattern_bioc = re.compile('.*<collection>.*')
-                    pattern_pubtator = re.compile('^([^\|]+)\|[^\|]+\|(.*)')
+                    pattern_pubtator = re.compile('^([^0-9A-Za-z]+)\|[^\|]+\|(.*)')
                     if pattern_pubtator.search(line):
                         input_format="PubTator"
                         break
@@ -223,40 +256,54 @@ def NER_main_path(inpath, para_set, outpath, modelfile):
                 if(input_format == "PubTator"):
                     NER_PubTator(inpath+infile,outpath+infile,nn_model,para_set)
                 elif(input_format == "BioC"):
-                    NER_BioC(inpath+infile,outpath+infile,nn_model,para_set)    
-        
+                    NER_BioC(inpath+infile,outpath+infile,nn_model,para_set)
+
         print('tag done:',time.time()-start_time)
-    
+
 
 
 if __name__=="__main__":
-    
+
     parser = argparse.ArgumentParser(description='run AIONER, python NER_Tagging.py -i input -m NERmodel -e ALL -o output')
-    parser.add_argument('--inpath', '-i', help="input path",default='../example/input/')
-    parser.add_argument('--model', '-m', help="trained deep learning NER model file",default='../pretrained_models/AIONER/Bioformer-softmax-AIONER.h5')
-    parser.add_argument('--entity', '-e', help="predict entity type (Gene, Chemical, Disease, Variant, Species, CellLine, ALL)",default='ALL')
+    parser.add_argument('--inpath', '-i', help="input path",default='./example/input/')
+    parser.add_argument('--model', '-m', help="trained deep learning NER model file",default='./AIONER_trained_models/AIONER/Bioformer-Softmax-BEST-AIO_tmvar1.h5')
+    parser.add_argument('--entity', '-e', help="predict entity type (Gene, Chemical, Disease, Mutation, Species, CellLine, ALL)",default='ALL')
     parser.add_argument('--vocabfile', '-v', help="vocab file with BIO label",default='../vocab/AIO_label.vocab')
-    parser.add_argument('--models_base_dir', '-b', help="base directory of the models",default='../')
-    parser.add_argument('--outpath', '-o', help="output path to save the NER tagged results",default='../example/output/')
+    parser.add_argument('--checkpoint', '-c', help="base directory of the checkpoint",default='../')
+    parser.add_argument('--stanza_model', '-s', help="stanza model",default='AIONER_trained_models/stanza')
+    parser.add_argument('--outpath', '-o', help="output path to save the NER tagged results",default='./example/output/')
+    parser.add_argument('--NUM_THREADS', '-t', help="Number of threads",default='3')
     args = parser.parse_args()
-    
+
+    if args.NUM_THREADS.isdigit() == False:
+        args.NUM_THREADS='3'
+
+    #tf.config.threading.set_inter_op_parallelism_threads(int(args.NUM_THREADS))
+
+    #
+    # limit to one cpu
+    #
+    session_conf = tf.compat.v1.ConfigProto(intra_op_parallelism_threads=int(args.NUM_THREADS), inter_op_parallelism_threads=int(args.NUM_THREADS))
+    sess = tf.compat.v1.Session(config=session_conf)
+
     if args.outpath[-1]!='/':
         args.outpath+='/'
     if not os.path.exists(args.outpath):
         os.makedirs(args.outpath)
-    
+
     print('==============\n| AIONER |\n==============')
-    
+
     model_paras=args.model.split('/')[-1].split('-')
     para_set={
               'encoder_type':model_paras[0].lower(), # pubmedbert or bioformer
               'decoder_type':model_paras[1].lower(),# crf or softmax
               'entity_type':args.entity,
               'vocabfile':args.vocabfile,
-              'models_base_dir':args.models_base_dir
+              'checkpoint':args.checkpoint
               }
-    print('run parameters:', para_set)
+    print('run parameters:', para_set, args.stanza_model)
+
+    nlp = stanza.Pipeline(model_dir=args.stanza_model, lang='en', processors={'tokenize': 'spacy'},package=None, download_method=None) #package='craft' ;./gnorm_trained_models/stanza
 
     NER_main_path(args.inpath, para_set, args.outpath, args.model)
-    
 
