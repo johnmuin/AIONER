@@ -108,19 +108,34 @@ def NER_PubTator(infile,outfile,nn_model,para_set):
             for doc in all_text:
                 print("Processing:{0}%".format(round(doc_num * 100 / Total_n)), end="\r")
                 doc_num+=1
-                lines = doc.split('\n')
-                seg=lines[0].split('|t|')
-                pmid=seg[0]
-                title=seg[1]
-                seg=lines[1].split('|a|')
-                abstract=seg[1]
+                lines = [line for line in doc.split('\n') if line.strip()]
+                if not lines or '|t|' not in lines[0] or len(lines) < 2 or '|a|' not in lines[1]:
+                    print(f"Skipping malformed document: {lines[0] if lines else 'EMPTY'}")
+                    continue
+                seg = lines[0].split('|t|', 1)
+                if len(seg) < 2:
+                    print(f"Skipping malformed title line: {lines[0]}")
+                    continue
+                pmid = seg[0]
+                title = seg[1]
+                seg = lines[1].split('|a|', 1)
+                if len(seg) < 2:
+                    print(f"Skipping malformed abstract line: {lines[1]}")
+                    continue
+                abstract = seg[1]
                 
-                intext=title+' '+abstract
+                placeholder_titles = {'abstract', 'paragraph', 'summary'}
+                if title.strip().lower() in placeholder_titles:
+                    intext = abstract
+                    offset_base = len(title) + 1
+                else:
+                    intext = title + ' ' + abstract
+                    offset_base = 0
                 tag_result=ML_Tag(intext,nn_model,decoder_type=para_set['decoder_type'],entity_type=para_set['entity_type'])
                 fout.write(lines[0]+'\n'+lines[1]+'\n')
                 for ele in tag_result:
-                    ent_start = ele[0]
-                    ent_last = ele[1]
+                    ent_start = str(int(ele[0]) + offset_base)
+                    ent_last = str(int(ele[1]) + offset_base)
                     ent_mention = intext[int(ele[0]):int(ele[1])]
                     ent_type=ele[2]
                     fout.write(pmid+"\t"+ent_start+"\t"+ent_last+"\t"+ent_mention+"\t"+ent_type+"\n")
@@ -259,4 +274,3 @@ if __name__=="__main__":
 
     NER_main_path(args.inpath, para_set, args.outpath, args.model)
     
-
